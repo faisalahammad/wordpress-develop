@@ -5662,7 +5662,7 @@ class wp_xmlrpc_server extends IXR_Server {
 			if ( $enclosures ) {
 				foreach ( $enclosures as $enc ) {
 					// This method used to omit the trailing new line. #23219
-					if ( rtrim( $enc, "\n" ) == rtrim( $encstring, "\n" ) ) {
+					if ( rtrim( $enc, "\n" ) === rtrim( $encstring, "\n" ) ) {
 						$found = true;
 						break;
 					}
@@ -5691,7 +5691,7 @@ class wp_xmlrpc_server extends IXR_Server {
 		$attachments = $wpdb->get_results( "SELECT ID, guid FROM {$wpdb->posts} WHERE post_parent = '0' AND post_type = 'attachment'" );
 		if ( is_array( $attachments ) ) {
 			foreach ( $attachments as $file ) {
-				if ( ! empty( $file->guid ) && strpos( $post_content, $file->guid ) !== false ) {
+				if ( ! empty( $file->guid ) && str_contains( $post_content, $file->guid ) ) {
 					$wpdb->update( $wpdb->posts, array( 'post_parent' => $post_id ), array( 'ID' => $file->ID ) );
 				}
 			}
