@@ -219,4 +219,184 @@ class Tests_Meta_BulkDeleteMetadataByMid extends WP_UnitTestCase {
 
 		$this->assertSame( array(), get_comment_meta( $comment_id ) );
 	}
+
+	/**
+	 * @ticket 37702
+	 *
+	 * @covers ::wp_delete_post
+	 * @covers ::wp_delete_attachment
+	 * @covers ::wp_delete_comment
+	 * @covers ::wp_delete_user
+	 * @covers ::wpmu_delete_user
+	 *
+	 * @dataProvider data_object_types_deleted_with_their_meta
+	 *
+	 * @param string $object_type Object type, where attachments use post meta.
+	 */
+	public function test_deleting_object_should_fire_meta_actions_with_array_of_meta_ids_in_batches( $object_type ) {
+		list( $object_id, $meta_ids ) = $this->create_object_with_meta( $object_type );
+
+		$meta_type = ( 'attachment' === $object_type ) ? 'post' : $object_type;
+
+		$events  = array();
+		$args    = array();
+		$remains = array();
+
+		add_action(
+			"delete_{$meta_type}_meta",
+			static function ( $ids, $id, $key ) use ( &$events, &$args, &$remains, $meta_type ) {
+				if ( 0 !== strpos( $key, 'synthetic_' ) ) {
+					return;
+				}
+				$events[]               = "delete:$key";
+				$args['delete'][ $key ] = array( $ids, $id );
+				$remains[ $key ]        = array_keys( get_metadata( $meta_type, $id ) );
+			},
+			10,
+			3
+		);
+		add_action(
+			"deleted_{$meta_type}_meta",
+			static function ( $ids, $id, $key ) use ( &$events, &$args ) {
+				if ( 0 !== strpos( $key, 'synthetic_' ) ) {
+					return;
+				}
+				$events[]                = "deleted:$key";
+				$args['deleted'][ $key ] = array( $ids, $id );
+			},
+			10,
+			3
+		);
+
+		$this->delete_object( $object_type, $object_id );
+
+		$this->assertSame(
+			array( 'delete:synthetic_a', 'delete:synthetic_b', 'deleted:synthetic_a', 'deleted:synthetic_b' ),
+			$events,
+			'All before actions should fire before any after action.'
+		);
+
+		foreach ( array( 'delete', 'deleted' ) as $when ) {
+			$this->assertSame( array( array( $meta_ids['synthetic_a'] ), $object_id ), $args[ $when ]['synthetic_a'], "{$when}_{$meta_type}_meta args for synthetic_a do not match." );
+			$this->assertSame( array( array( $meta_ids['synthetic_b'] ), $object_id ), $args[ $when ]['synthetic_b'], "{$when}_{$meta_type}_meta args for synthetic_b do not match." );
+		}
+
+		foreach ( $remains as $key => $present ) {
+			$this->assertContains( 'synthetic_a', $present, "Before action for $key should still see synthetic_a." );
+			$this->assertContains( 'synthetic_b', $present, "Before action for $key should still see synthetic_b." );
+		}
+
+		$this->assertSame( array(), array_intersect_key( get_metadata( $meta_type, $object_id ), array_flip( array( 'synthetic_a', 'synthetic_b' ) ) ) );
+	}
+
+	/**
+	 * Data provider.
+	 *
+	 * @return array[]
+	 */
+	public static function data_object_types_deleted_with_their_meta() {
+		return array(
+			'post'       => array( 'post' ),
+			'attachment' => array( 'attachment' ),
+			'comment'    => array( 'comment' ),
+			'user'       => array( 'user' ),
+		);
+	}
+
+	/**
+	 * @ticket 37702
+	 *
+	 * @covers ::wp_delete_site
+	 *
+	 * @group ms-required
+	 */
+	public function test_deleting_site_should_fire_blog_meta_actions_with_array_of_meta_ids_in_batches() {
+		if ( ! is_site_meta_supported() ) {
+			$this->markTestSkipped( 'Site meta is not supported.' );
+		}
+
+		$site_id = self::factory()->blog->create();
+		$mid1    = add_site_meta( $site_id, 'synthetic_a', '1' );
+		$mid2    = add_site_meta( $site_id, 'synthetic_b', '2' );
+
+		$delete  = new MockAction();
+		$deleted = new MockAction();
+		add_action( 'delete_blog_meta', array( $delete, 'action' ), 10, 4 );
+		add_action( 'deleted_blog_meta', array( $deleted, 'action' ), 10, 4 );
+
+		wp_delete_site( $site_id );
+
+		$expected = array(
+			array( array( $mid1 ), $site_id, 'synthetic_a', '1' ),
+			array( array( $mid2 ), $site_id, 'synthetic_b', '2' ),
+		);
+
+		$this->assertSame( $expected, $delete->get_args(), 'delete_blog_meta args do not match.' );
+		$this->assertSame( $expected, $deleted->get_args(), 'deleted_blog_meta args do not match.' );
+	}
+
+	/**
+	 * Creates an object of the given meta type with two synthetic meta rows.
+	 *
+	 * @param string $meta_type Object type, where attachments use post meta.
+	 * @return array Object ID and a map of meta key to meta ID.
+	 */
+	private function create_object_with_meta( $meta_type ) {
+		$object_type = $meta_type;
+
+		switch ( $object_type ) {
+			case 'comment':
+				$object_id = self::factory()->comment->create();
+				break;
+			case 'user':
+				$object_id = self::factory()->user->create();
+				break;
+			case 'attachment':
+				$object_id = self::factory()->attachment->create_object(
+					array(
+						'file'           => 'synthetic.jpg',
+						'post_mime_type' => 'image/jpeg',
+					)
+				);
+				break;
+			default:
+				$object_id = self::factory()->post->create();
+		}
+
+		$meta_type = ( 'attachment' === $meta_type ) ? 'post' : $meta_type;
+
+		return array(
+			$object_id,
+			array(
+				'synthetic_a' => add_metadata( $meta_type, $object_id, 'synthetic_a', '1' ),
+				'synthetic_b' => add_metadata( $meta_type, $object_id, 'synthetic_b', '2' ),
+			),
+		);
+	}
+
+	/**
+	 * Permanently deletes an object of the given meta type.
+	 *
+	 * @param string $meta_type Object type.
+	 * @param int    $object_id Object ID.
+	 */
+	private function delete_object( $meta_type, $object_id ) {
+		switch ( $meta_type ) {
+			case 'comment':
+				wp_delete_comment( $object_id, true );
+				break;
+			case 'user':
+				if ( is_multisite() ) {
+					wpmu_delete_user( $object_id );
+				} else {
+					wp_delete_user( $object_id );
+				}
+				break;
+			case 'attachment':
+				wp_delete_attachment( $object_id, true );
+				break;
+			default:
+				wp_delete_post( $object_id, true );
+		}
+	}
 }

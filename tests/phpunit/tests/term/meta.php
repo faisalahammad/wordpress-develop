@@ -440,6 +440,126 @@ class Tests_Term_Meta extends WP_UnitTestCase {
 	}
 
 	/**
+	 * @ticket 37702
+	 *
+	 * @covers ::wp_delete_term
+	 */
+	public function test_deleting_term_should_fire_term_meta_actions_with_an_array_of_meta_ids_for_each_row() {
+		$t = self::factory()->term->create( array( 'taxonomy' => 'wptests_tax' ) );
+
+		$mid1 = add_term_meta( $t, 'foo', 'bar' );
+		$mid2 = add_term_meta( $t, 'baz', array( 'qux' ) );
+
+		$delete  = new MockAction();
+		$deleted = new MockAction();
+		add_action( 'delete_term_meta', array( $delete, 'action' ), 10, 4 );
+		add_action( 'deleted_term_meta', array( $deleted, 'action' ), 10, 4 );
+
+		$this->assertTrue( wp_delete_term( $t, 'wptests_tax' ) );
+
+		$expected = array(
+			array( array( $mid1 ), $t, 'foo', 'bar' ),
+			array( array( $mid2 ), $t, 'baz', array( 'qux' ) ),
+		);
+
+		$this->assertSame( $expected, $delete->get_args(), 'delete_term_meta args do not match.' );
+		$this->assertSame( $expected, $deleted->get_args(), 'deleted_term_meta args do not match.' );
+	}
+
+	/**
+	 * Documents the order of the actions: every delete_term_meta action fires,
+	 * then the term meta is deleted in one query, then every deleted_term_meta
+	 * action fires.
+	 *
+	 * @ticket 37702
+	 *
+	 * @covers ::wp_delete_term
+	 */
+	public function test_deleting_term_should_fire_all_before_actions_then_delete_then_fire_all_after_actions() {
+		$t = self::factory()->term->create( array( 'taxonomy' => 'wptests_tax' ) );
+
+		add_term_meta( $t, 'one', '1' );
+		add_term_meta( $t, 'two', '2' );
+		add_term_meta( $t, 'three', '3' );
+
+		$events = array();
+
+		add_action(
+			'delete_term_meta',
+			static function ( $meta_ids, $term_id, $meta_key ) use ( &$events ) {
+				$events[] = "delete:$meta_key";
+			},
+			10,
+			3
+		);
+		add_action(
+			'deleted_term_meta',
+			static function ( $meta_ids, $term_id, $meta_key ) use ( &$events ) {
+				$events[] = "deleted:$meta_key";
+			},
+			10,
+			3
+		);
+
+		wp_delete_term( $t, 'wptests_tax' );
+
+		$this->assertSame(
+			array( 'delete:one', 'delete:two', 'delete:three', 'deleted:one', 'deleted:two', 'deleted:three' ),
+			$events,
+			'All delete_term_meta actions should fire before any deleted_term_meta action.'
+		);
+	}
+
+	/**
+	 * Documents what a callback can observe: delete_term_meta callbacks see every
+	 * row of the term, and deleted_term_meta callbacks see none of them.
+	 *
+	 * @ticket 37702
+	 *
+	 * @covers ::wp_delete_term
+	 */
+	public function test_deleting_term_should_expose_all_or_no_term_meta_to_callbacks() {
+		$t = self::factory()->term->create( array( 'taxonomy' => 'wptests_tax' ) );
+
+		add_term_meta( $t, 'one', '1' );
+		add_term_meta( $t, 'two', '2' );
+		add_term_meta( $t, 'three', '3' );
+
+		$remaining_before = array();
+		$remaining_after  = array();
+
+		add_action(
+			'delete_term_meta',
+			static function ( $meta_ids, $term_id, $meta_key ) use ( &$remaining_before ) {
+				$remaining_before[ $meta_key ] = array_keys( get_term_meta( $term_id ) );
+			},
+			10,
+			3
+		);
+		add_action(
+			'deleted_term_meta',
+			static function ( $meta_ids, $term_id, $meta_key ) use ( &$remaining_after ) {
+				$remaining_after[ $meta_key ] = array_keys( get_term_meta( $term_id ) );
+			},
+			10,
+			3
+		);
+
+		wp_delete_term( $t, 'wptests_tax' );
+
+		$this->assertCount( 3, $remaining_before );
+		$this->assertCount( 3, $remaining_after );
+
+		foreach ( $remaining_before as $meta_key => $keys ) {
+			$this->assertSame( array( 'one', 'two', 'three' ), $keys, "delete_term_meta callback for $meta_key should still see all of the term meta." );
+		}
+
+		foreach ( $remaining_after as $meta_key => $keys ) {
+			$this->assertSame( array(), $keys, "deleted_term_meta callback for $meta_key should see no remaining term meta." );
+		}
+	}
+
+	/**
 	 * @ticket 35991
 	 */
 	public function test_has_term_meta() {
